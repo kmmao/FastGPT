@@ -1,25 +1,23 @@
 import { Pool } from 'pg';
 import type { QueryResultRow } from 'pg';
+import { PgTrainingTableName } from '@/constants/plugin';
 
-export const connectPg = async () => {
+export const connectPg = async (): Promise<Pool> => {
   if (global.pgClient) {
     return global.pgClient;
   }
 
   global.pgClient = new Pool({
-    host: process.env.PG_HOST,
-    port: process.env.PG_PORT ? +process.env.PG_PORT : 5432,
-    user: process.env.PG_USER,
-    password: process.env.PG_PASSWORD,
-    database: process.env.PG_DB_NAME,
+    connectionString: process.env.PG_URL,
     max: Number(process.env.DB_MAX_LINK || 5),
-    idleTimeoutMillis: 30000,
+    keepAlive: true,
     connectionTimeoutMillis: 5000
   });
 
   global.pgClient.on('error', (err) => {
     console.log(err);
     global.pgClient = null;
+    connectPg();
   });
 
   try {
@@ -28,7 +26,7 @@ export const connectPg = async () => {
     return global.pgClient;
   } catch (error) {
     global.pgClient = null;
-    return Promise.reject(error);
+    return connectPg();
   }
 };
 
@@ -173,7 +171,7 @@ export const insertKbItem = ({
     source?: string;
   }[];
 }) => {
-  return PgClient.insert('modelData', {
+  return PgClient.insert(PgTrainingTableName, {
     values: data.map((item) => [
       { key: 'user_id', value: userId },
       { key: 'kb_id', value: kbId },

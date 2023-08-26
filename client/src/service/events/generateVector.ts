@@ -1,6 +1,5 @@
-import { openaiAccountError } from '../errorCode';
 import { insertKbItem } from '@/service/pg';
-import { openaiEmbedding } from '@/pages/api/openapi/plugin/openaiEmbedding';
+import { getVector } from '@/pages/api/openapi/plugin/vector';
 import { TrainingData } from '../models/trainingData';
 import { ERROR_ENUM } from '../errorCode';
 import { TrainingModeEnum } from '@/constants/plugin';
@@ -17,12 +16,16 @@ export async function generateVector(): Promise<any> {
 
   let trainingId = '';
   let userId = '';
+  let dataItems: {
+    q: string;
+    a: string;
+  }[] = [];
 
   try {
     const data = await TrainingData.findOneAndUpdate(
       {
         mode: TrainingModeEnum.index,
-        lockTime: { $lte: new Date(Date.now() - 2 * 60 * 1000) }
+        lockTime: { $lte: new Date(Date.now() - 1 * 60 * 1000) }
       },
       {
         lockTime: new Date()
@@ -33,13 +36,14 @@ export async function generateVector(): Promise<any> {
       kbId: 1,
       q: 1,
       a: 1,
-      source: 1
+      source: 1,
+      vectorModel: 1
     });
 
     // task preemption
     if (!data) {
       reduceQueue();
-      global.vectorQueueLen <= 0 && console.log(`没有需要【索引】的数据, ${global.vectorQueueLen}`);
+      global.vectorQueueLen <= 0 && console.log(`【索引】任务完成`);
       return;
     }
 
@@ -47,18 +51,18 @@ export async function generateVector(): Promise<any> {
     userId = String(data.userId);
     const kbId = String(data.kbId);
 
-    const dataItems = [
+    dataItems = [
       {
-        q: data.q,
-        a: data.a
+        q: data.q.replace(/[\x00-\x1F]/g, ' '),
+        a: data.a.replace(/[\x00-\x1F]/g, ' ')
       }
     ];
 
     // 生成词向量
-    const vectors = await openaiEmbedding({
+    const { vectors } = await getVector({
+      model: data.vectorModel,
       input: dataItems.map((item) => item.q),
-      userId,
-      mustPay: true
+      userId
     });
 
     // 生成结果插入到 pg
@@ -75,7 +79,7 @@ export async function generateVector(): Promise<any> {
 
     // delete data from training
     await TrainingData.findByIdAndDelete(data._id);
-    console.log(`生成向量成功: ${data._id}`);
+    // console.log(`生成向量成功: ${data._id}`);
 
     reduceQueue();
     generateVector();
@@ -90,37 +94,47 @@ export async function generateVector(): Promise<any> {
     }
 
     // message error or openai account error
-    if (err?.message === 'invalid message format') {
-      console.log('删除一个任务');
-      await TrainingData.findByIdAndRemove(trainingId);
+    if (
+      err?.message === 'invalid message format' ||
+      err.response?.data?.error?.type === 'invalid_request_error'
+    ) {
+      console.log(dataItems);
+      try {
+        await TrainingData.findByIdAndUpdate(trainingId, {
+          lockTime: new Date('2998/5/5')
+        });
+      } catch (error) {}
+      return generateVector();
+    }
+
+    // err vector data
+    if (err?.code === 500) {
+      await TrainingData.findByIdAndDelete(trainingId);
+      return generateVector();
     }
 
     // 账号余额不足，删除任务
     if (userId && err === ERROR_ENUM.insufficientQuota) {
-      sendInform({
-        type: 'system',
-        title: '索引生成任务中止',
-        content:
-          '由于账号余额不足，索引生成任务中止，重新充值后将会继续。暂停的任务将在 7 天后被删除。',
-        userId
-      });
-      console.log('余额不足，暂停向量生成任务');
-      await TrainingData.updateMany(
-        {
+      try {
+        sendInform({
+          type: 'system',
+          title: '索引生成任务中止',
+          content:
+            '由于账号余额不足，索引生成任务中止，重新充值后将会继续。暂停的任务将在 7 天后被删除。',
           userId
-        },
-        {
-          lockTime: new Date('2999/5/5')
-        }
-      );
+        });
+        console.log('余额不足，暂停向量生成任务');
+        await TrainingData.updateMany(
+          {
+            userId
+          },
+          {
+            lockTime: new Date('2999/5/5')
+          }
+        );
+      } catch (error) {}
       return generateVector();
     }
-
-    // unlock
-    err.response?.statusText !== 'Too Many Requests' &&
-      (await TrainingData.findByIdAndUpdate(trainingId, {
-        lockTime: new Date('2000/1/1')
-      }));
 
     setTimeout(() => {
       generateVector();

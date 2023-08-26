@@ -1,27 +1,25 @@
-import type { BillSchema } from './mongoSchema';
+import { BillSourceEnum } from '@/constants/user';
+import type { BillSchema, UserModelSchema } from './mongoSchema';
 export interface UserType {
   _id: string;
   username: string;
   avatar: string;
-  openaiKey: string;
   balance: number;
-  promotion: {
-    rate: number;
-  };
+  promotionRate: UserModelSchema['promotionRate'];
+  openaiAccount: UserModelSchema['openaiAccount'];
 }
 
 export interface UserUpdateParams {
   balance?: number;
   avatar?: string;
-  openaiKey?: string;
+  openaiAccount?: UserModelSchema['openaiAccount'];
 }
 
 export interface UserBillType {
   id: string;
   time: Date;
-  modelName: string;
-  type: BillSchema['type'];
-  textLen: number;
-  tokenLen: number;
-  price: number;
+  appName: string;
+  source: BillSchema['source'];
+  total: number;
+  list: BillSchema['list'];
 }

@@ -1,16 +1,15 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { jsonRes } from '@/service/response';
-import { connectToDatabase, TrainingData } from '@/service/mongo';
+import { connectToDatabase, TrainingData, KB } from '@/service/mongo';
 import { authUser } from '@/service/utils/auth';
 import { authKb } from '@/service/utils/auth';
 import { withNextCors } from '@/service/utils/tools';
-import { TrainingModeEnum } from '@/constants/plugin';
+import { PgTrainingTableName, TrainingModeEnum } from '@/constants/plugin';
 import { startQueue } from '@/service/utils/tools';
 import { PgClient } from '@/service/pg';
 import { modelToolMap } from '@/utils/plugin';
-import { OpenAiChatEnum } from '@/constants/model';
 
-type DateItemType = { a: string; q: string; source?: string };
+export type DateItemType = { a: string; q: string; source?: string };
 
 export type Props = {
   kbId: string;
@@ -25,7 +24,7 @@ export type Response = {
 
 const modeMaxToken = {
   [TrainingModeEnum.index]: 6000,
-  [TrainingModeEnum.qa]: 10000
+  [TrainingModeEnum.qa]: 12000
 };
 
 export default withNextCors(async function handler(req: NextApiRequest, res: NextApiResponse<any>) {
@@ -35,6 +34,7 @@ export default withNextCors(async function handler(req: NextApiRequest, res: Nex
     if (!kbId || !Array.isArray(data)) {
       throw new Error('缺少参数');
     }
+
     await connectToDatabase();
 
     // 凭证校验
@@ -76,15 +76,14 @@ export async function pushDataToKb({
   data.forEach((item) => {
     const text = item.q + item.a;
 
-    if (mode === TrainingModeEnum.qa) {
-      // count token
-      const token = modelToolMap.countTokens({
-        model: OpenAiChatEnum.GPT3516k,
-        messages: [{ obj: 'System', value: item.q }]
-      });
-      if (token > modeMaxToken[TrainingModeEnum.qa]) {
-        return;
-      }
+    // count token
+    const token = modelToolMap.countTokens({
+      model: 'gpt-3.5-turbo',
+      messages: [{ obj: 'System', value: item.q }]
+    });
+
+    if (token > modeMaxToken[TrainingModeEnum.qa]) {
+      return;
     }
 
     if (!set.has(text)) {
@@ -116,7 +115,7 @@ export async function pushDataToKb({
         try {
           const { rows } = await PgClient.query(`
             SELECT COUNT(*) > 0 AS exists
-            FROM  modelData 
+            FROM  ${PgTrainingTableName} 
             WHERE md5(q)=md5('${q}') AND md5(a)=md5('${a}') AND user_id='${userId}' AND kb_id='${kbId}'
           `);
           const exists = rows[0]?.exists || false;
@@ -139,6 +138,13 @@ export async function pushDataToKb({
     .filter((item) => item.status === 'fulfilled')
     .map<DateItemType>((item: any) => item.value);
 
+  const vectorModel = await (async () => {
+    if (mode === TrainingModeEnum.index) {
+      return (await KB.findById(kbId, 'vectorModel'))?.vectorModel || global.vectorModels[0].model;
+    }
+    return global.vectorModels[0].model;
+  })();
+
   // 插入记录
   await TrainingData.insertMany(
     insertData.map((item) => ({
@@ -148,7 +154,8 @@ export async function pushDataToKb({
       userId,
       kbId,
       mode,
-      prompt
+      prompt,
+      vectorModel
     }))
   );
 
